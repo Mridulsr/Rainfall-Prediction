@@ -2,87 +2,109 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.figure_factory as ff
 from lightgbm import LGBMClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.naive_bayes import GaussianNB
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import roc_auc_score, accuracy_score
 
-# --- PAGE CONFIG ---
-st.set_page_config(page_title="Rainfall Analytics Dashboard", layout="wide")
+# --- CONFIG ---
+st.set_page_config(page_title="Rainfall ML Dashboard", layout="wide")
+st.title("🌧️ Advanced Rainfall Prediction Hub")
 
-st.title("🌧️ Rainfall Prediction & Analytics Dashboard")
-
-# --- FUNCTIONS ---
-def feature_engineering(df):
+# --- 1. FEATURE ENGINEERING (From Notebook) ---
+def apply_logic(df):
+    """Derived from notebook feature engineering steps"""
     df = df.copy()
-    df['temp_range'] = df['maxtemp'] - df['mintemp']
-    df['dew_depression'] = df['temparature'] - df['dewpoint']
+    if 'maxtemp' in df.columns and 'mintemp' in df.columns:
+        df['temp_range'] = df['maxtemp'] - df['mintemp']
+    if 'temparature' in df.columns and 'dewpoint' in df.columns:
+        df['dew_depression'] = df['temparature'] - df['dewpoint']
     if 'humidity' in df.columns and 'cloud' in df.columns:
         df['humidity_cloud_interaction'] = df['humidity'] * df['cloud']
     return df
 
+# --- 2. MODELING ENGINE ---
+def run_ml_pipeline(train_df, model_type):
+    train_df = apply_logic(train_df)
+    features = [c for c in train_df.columns if c not in ['id', 'rainfall']]
+    X = train_df[features]
+    y = train_df['rainfall']
+    
+    # Scaling is required for SVM and Logistic Regression
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    if model_type == "LGBM (Recommended)":
+        model = LGBMClassifier(n_estimators=100, learning_rate=0.05, verbosity=-1)
+    elif model_type == "Logistic Regression":
+        model = LogisticRegression()
+    elif model_type == "SVM":
+        model = SVC(probability=True)
+    elif model_type == "Naive Bayes":
+        model = GaussianNB()
+        
+    model.fit(X_scaled, y)
+    return model, features, scaler
+
 # --- SIDEBAR: FILE UPLOADS ---
-st.sidebar.header("Data Source")
-train_file = st.sidebar.file_uploader("Upload train.csv for Analysis", type="csv")
+st.sidebar.header("📁 Step 1: Data Upload")
+train_file = st.sidebar.file_uploader("Upload train.csv", type="csv")
+test_file = st.sidebar.file_uploader("Upload test.csv", type="csv")
 
-if train_file:
-    df = pd.read_csv(train_file)
-    df = feature_engineering(df)
+if train_file and test_file:
+    train_df = pd.read_csv(train_file)
+    test_df = pd.read_csv(test_file)
     
-    # --- INTERACTIVE DATA EXPLORATION ---
-    st.header("📊 Interactive Visualizations")
+    # --- STEP 2: ML CONFIG ---
+    st.sidebar.header("🤖 Step 2: Model Selection")
+    chosen_model = st.sidebar.selectbox("Choose Algorithm", 
+        ["LGBM (Recommended)", "Logistic Regression", "SVM", "Naive Bayes"])
     
-    col1, col2 = st.columns(2)
+    # --- DATA OPERATIONS (Dynamic Filters) ---
+    st.header("⚙️ Simultaneous Operations & Analysis")
+    st.markdown("Adjust these filters to update all charts and predictions instantly.")
     
-    with col1:
-        st.subheader("Distribution Analysis")
-        # User selects which feature to look at
-        viz_feature = st.selectbox("Select Feature for Distribution", 
-                                   ['temparature', 'humidity', 'maxtemp', 'mintemp', 'windspeed', 'temp_range'])
+    op_col1, op_col2, op_col3 = st.columns(3)
+    temp_min = op_col1.slider("Filter Min Temperature", float(train_df['mintemp'].min()), float(train_df['mintemp'].max()))
+    cloud_max = op_col2.slider("Max Cloud Cover", float(train_df['cloud'].min()), float(train_df['cloud'].max()))
+    target_view = op_col3.selectbox("Visual Focus", ["All", "Only Rain (1)", "Only No Rain (0)"])
+    
+    # Filter Data Simultaneously
+    filtered_df = train_df[(train_df['mintemp'] >= temp_min) & (train_df['cloud'] <= cloud_max)]
+    if target_view != "All":
+        val = 1 if target_view == "Only Rain (1)" else 0
+        filtered_df = filtered_df[filtered_df['rainfall'] == val]
+
+    # --- SIMULTANEOUS CHARTS ---
+    st.write(f"Showing {len(filtered_df)} matching records")
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.plotly_chart(px.box(filtered_df, x="rainfall", y="humidity", color="rainfall", title="Humidity Distribution"), use_container_width=True)
+        st.plotly_chart(px.histogram(filtered_df, x="windspeed", title="Wind Speed Frequency"), use_container_width=True)
+    
+    with c2:
+        st.plotly_chart(px.scatter(filtered_df, x="maxtemp", y="dewpoint", color="rainfall", title="Temp vs Dewpoint"), use_container_width=True)
+        st.plotly_chart(px.bar(filtered_df.groupby('rainfall').size().reset_index(name='count'), x='rainfall', y='count', title="Rainfall Count"), use_container_width=True)
+
+    # --- PREDICTION EXECUTION ---
+    if st.button("🚀 Run Prediction Pipeline"):
+        model, feat_cols, scaler = run_ml_pipeline(train_df, chosen_model)
         
-        # Choice of Plot Type
-        plot_type = st.radio("Chart Type", ["Box Plot", "Violin Plot", "Histogram"])
+        # Prepare test data
+        test_processed = apply_logic(test_df)
+        test_processed['winddirection'] = test_processed['winddirection'].fillna(train_df['winddirection'].median())
         
-        if plot_type == "Box Plot":
-            fig = px.box(df, x="rainfall", y=viz_feature, color="rainfall", points="all",
-                         title=f"{viz_feature} vs Rainfall")
-        elif plot_type == "Violin Plot":
-            fig = px.violin(df, x="rainfall", y=viz_feature, color="rainfall", box=True,
-                           title=f"{viz_feature} Density")
-        else:
-            fig = px.histogram(df, x=viz_feature, color="rainfall", barmode="overlay",
-                               title=f"{viz_feature} Distribution")
+        X_test_scaled = scaler.transform(test_processed[feat_cols])
+        preds = model.predict_proba(X_test_scaled)[:, 1]
         
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.subheader("Feature Correlations")
-        # Bar chart of correlation with target
-        corr = df.corr()['rainfall'].sort_values(ascending=False).drop('rainfall')
-        fig_corr = px.bar(corr, x=corr.index, y=corr.values, 
-                          labels={'index': 'Feature', 'y': 'Correlation Score'},
-                          title="What drives Rainfall? (Correlation)",
-                          color=corr.values, color_continuous_scale='RdBu')
-        st.plotly_chart(fig_corr, use_container_width=True)
-
-    # --- SIMULTANEOUS MULTI-VARIABLE ANALYSIS ---
-    st.header("🔍 Bi-Variate Analysis")
-    c1, c2, c3 = st.columns(3)
-    x_axis = c1.selectbox("X Axis", df.columns, index=2)
-    y_axis = c2.selectbox("Y Axis", df.columns, index=3)
-    size_bubble = c3.selectbox("Bubble Size (Optional)", [None] + list(df.columns))
-
-    fig_scatter = px.scatter(df, x=x_axis, y=y_axis, color="rainfall", 
-                             size=size_bubble, hover_data=['id'],
-                             title=f"{x_axis} vs {y_axis}")
-    st.plotly_chart(fig_scatter, use_container_width=True)
-
-    # --- HEATMAP ---
-    if st.checkbox("Show Correlation Heatmap"):
-        st.subheader("Full Correlation Matrix")
-        df_corr = df.corr()
-        fig_heat = px.imshow(df_corr, text_auto=True, aspect="auto", 
-                             color_continuous_scale='Viridis',
-                             title="Interactive Heatmap")
-        st.plotly_chart(fig_heat, use_container_width=True)
+        res = pd.DataFrame({'id': test_df['id'], 'rainfall_prob': preds})
+        st.success(f"Predictions complete using {chosen_model}!")
+        st.dataframe(res.head(20))
+        
+        st.download_button("Download CSV", res.to_csv(index=False), "output.csv", "text/csv")
 
 else:
-    st.info("👋 Welcome! Please upload your `train.csv` in the sidebar to visualize the weather patterns.")
+    st.info("Please upload your CSV files to activate the dashboard.")
