@@ -1,91 +1,88 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
+import plotly.figure_factory as ff
 from lightgbm import LGBMClassifier
-import os
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Rainfall Predictor", layout="wide")
+st.set_page_config(page_title="Rainfall Analytics Dashboard", layout="wide")
 
-st.title("🌧️ Rainfall Binary Prediction App")
-st.markdown("""
-This app predicts the probability of rainfall based on weather parameters using the logic from your Kaggle notebook.
-""")
+st.title("🌧️ Rainfall Prediction & Analytics Dashboard")
 
 # --- FUNCTIONS ---
 def feature_engineering(df):
-    """Applies the feature engineering steps found in the notebook."""
     df = df.copy()
-    # Logic extracted from notebook cells 8 and 9
     df['temp_range'] = df['maxtemp'] - df['mintemp']
     df['dew_depression'] = df['temparature'] - df['dewpoint']
     if 'humidity' in df.columns and 'cloud' in df.columns:
         df['humidity_cloud_interaction'] = df['humidity'] * df['cloud']
     return df
 
-@st.cache_data
-def train_model(train_df):
-    """Trains the LightGBM model on the uploaded training data."""
-    train_df = feature_engineering(train_df)
-    features = [c for c in train_df.columns if c not in ['id', 'rainfall']]
-    X = train_df[features]
-    y = train_df['rainfall']
-    
-    model = LGBMClassifier(
-        n_estimators=1000, 
-        learning_rate=0.03, 
-        max_depth=6, 
-        verbosity=-1,
-        random_state=42
-    )
-    model.fit(X, y)
-    return model, features
-
 # --- SIDEBAR: FILE UPLOADS ---
-st.sidebar.header("Upload Datasets")
-train_file = st.sidebar.file_uploader("Upload train.csv", type="csv")
-test_file = st.sidebar.file_uploader("Upload test.csv", type="csv")
+st.sidebar.header("Data Source")
+train_file = st.sidebar.file_uploader("Upload train.csv for Analysis", type="csv")
 
-if train_file and test_file:
-    train_df = pd.read_csv(train_file)
-    test_df = pd.read_csv(test_file)
+if train_file:
+    df = pd.read_csv(train_file)
+    df = feature_engineering(df)
     
-    st.success("Files uploaded successfully!")
+    # --- INTERACTIVE DATA EXPLORATION ---
+    st.header("📊 Interactive Visualizations")
     
-    # --- TRAINING ---
-    with st.status("Training model..."):
-        model, features = train_model(train_df)
-    st.write("### Model Training Complete")
-    st.write(f"Features used: `{', '.join(features)}`")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Distribution Analysis")
+        # User selects which feature to look at
+        viz_feature = st.selectbox("Select Feature for Distribution", 
+                                   ['temparature', 'humidity', 'maxtemp', 'mintemp', 'windspeed', 'temp_range'])
+        
+        # Choice of Plot Type
+        plot_type = st.radio("Chart Type", ["Box Plot", "Violin Plot", "Histogram"])
+        
+        if plot_type == "Box Plot":
+            fig = px.box(df, x="rainfall", y=viz_feature, color="rainfall", points="all",
+                         title=f"{viz_feature} vs Rainfall")
+        elif plot_type == "Violin Plot":
+            fig = px.violin(df, x="rainfall", y=viz_feature, color="rainfall", box=True,
+                           title=f"{viz_feature} Density")
+        else:
+            fig = px.histogram(df, x=viz_feature, color="rainfall", barmode="overlay",
+                               title=f"{viz_feature} Distribution")
+        
+        st.plotly_chart(fig, use_container_width=True)
 
-    # --- PREDICTION ---
-    st.write("### Predictions")
-    if st.button("Generate Predictions"):
-        # Preprocess test data
-        test_processed = feature_engineering(test_df)
-        
-        # Handle missing winddirection as per notebook logic
-        if 'winddirection' in test_processed.columns:
-            median_val = train_df['winddirection'].median()
-            test_processed['winddirection'] = test_processed['winddirection'].fillna(median_val)
-            
-        # Predict probabilities
-        probs = model.predict_proba(test_processed[features])[:, 1]
-        
-        submission = pd.DataFrame({
-            'id': test_df['id'] if 'id' in test_df.columns else range(len(probs)),
-            'rainfall': probs
-        })
-        
-        st.dataframe(submission.head(10))
-        
-        # --- DOWNLOAD ---
-        csv = submission.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="Download final_submission.csv",
-            data=csv,
-            file_name='final_submission.csv',
-            mime='text/csv',
-        )
+    with col2:
+        st.subheader("Feature Correlations")
+        # Bar chart of correlation with target
+        corr = df.corr()['rainfall'].sort_values(ascending=False).drop('rainfall')
+        fig_corr = px.bar(corr, x=corr.index, y=corr.values, 
+                          labels={'index': 'Feature', 'y': 'Correlation Score'},
+                          title="What drives Rainfall? (Correlation)",
+                          color=corr.values, color_continuous_scale='RdBu')
+        st.plotly_chart(fig_corr, use_container_width=True)
+
+    # --- SIMULTANEOUS MULTI-VARIABLE ANALYSIS ---
+    st.header("🔍 Bi-Variate Analysis")
+    c1, c2, c3 = st.columns(3)
+    x_axis = c1.selectbox("X Axis", df.columns, index=2)
+    y_axis = c2.selectbox("Y Axis", df.columns, index=3)
+    size_bubble = c3.selectbox("Bubble Size (Optional)", [None] + list(df.columns))
+
+    fig_scatter = px.scatter(df, x=x_axis, y=y_axis, color="rainfall", 
+                             size=size_bubble, hover_data=['id'],
+                             title=f"{x_axis} vs {y_axis}")
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+    # --- HEATMAP ---
+    if st.checkbox("Show Correlation Heatmap"):
+        st.subheader("Full Correlation Matrix")
+        df_corr = df.corr()
+        fig_heat = px.imshow(df_corr, text_auto=True, aspect="auto", 
+                             color_continuous_scale='Viridis',
+                             title="Interactive Heatmap")
+        st.plotly_chart(fig_heat, use_container_width=True)
+
 else:
-    st.info("Please upload both `train.csv` and `test.csv` in the sidebar to begin.")
+    st.info("👋 Welcome! Please upload your `train.csv` in the sidebar to visualize the weather patterns.")
